@@ -11,6 +11,8 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 from pathlib import Path
+import os
+from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -23,11 +25,34 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = 'django-insecure-uheat(24glm3+ag3#7-99l%v%g_mm7u1z&2v&1b*#!l=mqna@u'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DJANGO_DEBUG', 'true').lower() == 'true'
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [host.strip() for host in os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',') if host.strip()]
 
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', SECRET_KEY)
+PHONE_OTP_SECRET = os.environ.get('PHONE_OTP_SECRET', SECRET_KEY)
+if not DEBUG:
+    if not os.environ.get('DJANGO_SECRET_KEY') or not os.environ.get('PHONE_OTP_SECRET'):
+        raise ImproperlyConfigured('Set DJANGO_SECRET_KEY and PHONE_OTP_SECRET in production.')
 
+SMS_BACKEND = os.environ.get(
+    'SMS_BACKEND',
+    'accounts.sms_service.console_send_sms' if DEBUG else 'accounts.sms_service.twilio_send_sms',
+)
+if not DEBUG and SMS_BACKEND == 'accounts.sms_service.console_send_sms':
+    raise ImproperlyConfigured('Console SMS cannot be used in production.')
+TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID', '')
+TWILIO_AUTH_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', '')
+TWILIO_FROM_NUMBER = os.environ.get('TWILIO_FROM_NUMBER', '')
+TWILIO_MESSAGING_SERVICE_SID = os.environ.get('TWILIO_MESSAGING_SERVICE_SID', '')
+SMS_TIMEOUT = 10
+
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache' if DEBUG else 'django.core.cache.backends.db.DatabaseCache',
+        'LOCATION': 'otp-development' if DEBUG else 'otp_rate_limits',
+    },
+}
 # Application definition
 
 INSTALLED_APPS = [
@@ -86,9 +111,13 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.environ.get("DB_NAME", "inventory_db"),
+        "USER": os.environ.get("DB_USER", "jhalto"),
+        "PASSWORD": os.environ["DB_PASSWORD"],
+        "HOST": os.environ.get("DB_HOST", "localhost"),
+        "PORT": os.environ.get("DB_PORT", "5432"),
     }
 }
 
@@ -135,6 +164,21 @@ STATIC_URL = 'static/'
 
 MAILERS = {
     'default': {
-        'BACKEND': 'django.core.mail.backends.console.EmailBackend',
+        'BACKEND': os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend'),
     },
 }
+
+if MAILERS['default']['BACKEND'] == 'django.core.mail.backends.smtp.EmailBackend':
+    MAILERS['default']['OPTIONS'] = {
+        'host': os.environ.get('EMAIL_HOST', 'smtp.gmail.com'),
+        'port': int(os.environ.get('EMAIL_PORT', '587')),
+        'username': os.environ.get('EMAIL_HOST_USER', ''),
+        'password': os.environ.get('EMAIL_HOST_PASSWORD', ''),
+        'use_tls': os.environ.get('EMAIL_USE_TLS', 'true').lower() == 'true',
+        'use_ssl': os.environ.get('EMAIL_USE_SSL', 'false').lower() == 'true',
+        'timeout': 10,
+    }
+
+DEFAULT_FROM_EMAIL = os.environ.get(
+    'DEFAULT_FROM_EMAIL', os.environ.get('EMAIL_HOST_USER', 'webmaster@localhost')
+)
