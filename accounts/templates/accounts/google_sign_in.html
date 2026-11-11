@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in | Inventory &amp; Sales</title>
+  <style>
+    body {font-family:system-ui,sans-serif;background:#f5f7fa;color:#172234;display:grid;place-items:center;min-height:100vh;margin:0}
+    main {background:white;padding:2.5rem;border-radius:16px;box-shadow:0 8px 32px #17223412;max-width:420px;margin:1rem}
+    h1 {font-size:1.5rem} p {line-height:1.6} #message {min-height:3rem} button {font:inherit}
+  </style>
+</head>
+<body>
+<main>
+  <h1>Sign in to Inventory &amp; Sales</h1>
+  <p>Use your Google account to continue.</p>
+  <div id="google-button"></div>
+  <form id="link-form" hidden>
+    <p>Confirm your existing account to link Google.</p>
+    <p><label>Email<br><input name="email" type="email" autocomplete="username" required></label></p>
+    <p><label>App password<br><input name="password" type="password" autocomplete="current-password" required></label></p>
+    <button type="submit">Link Google and sign in</button>
+  </form>
+  <p id="message" role="status" aria-live="polite"></p>
+</main>
+{{ google_config|json_script:"google-config" }}
+<script>
+  const config = JSON.parse(document.getElementById('google-config').textContent);
+  let appTokens = null;
+  let pendingCredential = null;
+  function signedIn(data) {
+    appTokens = {access_token: data.data.access_token, refresh_token: data.data.refresh_token};
+    pendingCredential = null;
+    document.getElementById('message').textContent = 'Signed in as ' + data.data.user.email + '.';
+    document.getElementById('google-button').hidden = true;
+    document.getElementById('link-form').hidden = true;
+  }
+  document.getElementById('link-form').addEventListener('submit', async function (event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const message = document.getElementById('message');
+    const button = form.querySelector('button');
+    button.disabled = true;
+    try {
+      const login = await fetch('{% url "login" %}', {
+        method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({email:form.elements.email.value,password:form.elements.password.value})
+      });
+      const account = await login.json();
+      if (!login.ok) { message.textContent = account.message || 'Unable to confirm your existing account.'; return; }
+      const result = await fetch('{% url "google-link" %}', {
+        method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json','X-CSRFToken':config.csrf_token,'Authorization':'Bearer ' + account.data.access_token},
+        body:JSON.stringify({credential:pendingCredential})
+      });
+      const data = await result.json();
+      if (!result.ok) { message.textContent = data.error || 'Unable to link Google. Please start again.'; return; }
+      signedIn(data);
+    } catch (_) { message.textContent = 'Connection failed. Please try again.'; }
+    finally { form.elements.password.value = ''; button.disabled = false; }
+  });
+  window.startGoogleSignIn = function () {
+    google.accounts.id.initialize({
+      client_id: config.client_id, nonce: config.nonce,
+      callback: async function (response) {
+        const message = document.getElementById('message');
+        message.textContent = 'Signing in…';
+        try {
+          const result = await fetch('{% url "google-login" %}', {
+            method: 'POST', credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json', 'X-CSRFToken': config.csrf_token},
+            body: JSON.stringify({credential: response.credential})
+          });
+          const data = await result.json();
+          if (!result.ok) {
+            if (data.code === 'google_link_required') {
+              pendingCredential = response.credential;
+              document.getElementById('link-form').hidden = false;
+            }
+            message.textContent = data.error || 'Unable to sign in. Please try again.';
+            return;
+          }
+          // Keep tokens in memory; a full frontend can consume them after sign-in.
+          signedIn(data);
+        } catch (_) { message.textContent = 'Connection failed. Please try again.'; }
+      }
+    });
+    google.accounts.id.renderButton(document.getElementById('google-button'), {theme:'outline',size:'large'});
+  };
+</script>
+<script src="https://accounts.google.com/gsi/client" async defer onload="startGoogleSignIn()"></script>
+</body>
+</html>

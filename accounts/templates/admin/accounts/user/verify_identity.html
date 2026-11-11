@@ -1,0 +1,9 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+  <p>Confirm ownership before manually marking an identity verified.</p>
+  <dl><dt>Email</dt><dd>{{ original.email|default:"Not set" }}</dd><dt>Phone</dt><dd>{{ original.phone|default:"Not set" }}</dd></dl>
+  <form method="post">{% csrf_token %}
+    {{ form.as_p }}
+    <input type="submit" value="Confirm manual verification and record reason">
+  </form>
+{% endblock %}

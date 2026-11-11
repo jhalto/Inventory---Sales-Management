@@ -1,16 +1,17 @@
 from unittest.mock import patch
 import re
-from datetime import timedelta
+import time
+from datetime import datetime, timedelta, timezone as datetime_timezone
 
 from django.core import mail
 from django.core.cache import cache
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
-from rest_framework.test import APITestCase
+from rest_framework.test import APITransactionTestCase
 
 from accounts.models import EmailOTP, User
-from accounts.models import PhoneOTP
+from accounts.models import PhoneOTP, PhoneOTPRecipient
 from accounts.otp_service import hash_otp
 from accounts.sms_service import SMSDeliveryError
 
@@ -18,9 +19,16 @@ from accounts.sms_service import SMSDeliveryError
 @override_settings(
     MAILERS={'default': {'BACKEND': 'django.core.mail.backends.locmem.EmailBackend'}},
 )
-class EmailVerificationTests(APITestCase):
+class EmailVerificationTests(APITransactionTestCase):
     def setUp(self):
         cache.clear()
+        self.throttle_now = time.time()
+        timer = patch('accounts.throttles.AccountThrottle.timer', new=staticmethod(lambda: self.throttle_now))
+        timer.start()
+        self.addCleanup(timer.stop)
+        delivery_clock = patch('accounts.delivery_limits.database_now', new=lambda: datetime.fromtimestamp(self.throttle_now, tz=datetime_timezone.utc))
+        delivery_clock.start()
+        self.addCleanup(delivery_clock.stop)
         self.credentials = {'email': 'new@example.com', 'password': 'StrongTestPass!7359'}
 
     def register(self):
@@ -60,25 +68,29 @@ class EmailVerificationTests(APITestCase):
 
     def test_email_change_invalidates_code(self):
         self.register()
-        User.objects.update(email='changed@example.com')
+        user = User.objects.get()
+        user.email = 'changed@example.com'
+        user.save(update_fields=['email'])
         self.credentials['email'] = 'changed@example.com'
         self.assertEqual(self.verify(self.emailed_otp()).status_code, 400)
 
     def test_resend_supports_existing_unverified_accounts(self):
         self.register()
+        self.throttle_now += 61
         response = self.client.post(reverse('resend-verification-email'), {'email': 'new@example.com'})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(mail.outbox), 2)
         self.assertEqual(self.verify(self.emailed_otp()).status_code, 200)
+        self.throttle_now += 61
         self.client.post(reverse('resend-verification-email'), {'email': 'new@example.com'})
         self.assertEqual(len(mail.outbox), 2)
 
-    def test_delivery_failure_rolls_back_registration(self):
-        with patch('accounts.email_service.send_mail', side_effect=OSError('SMTP unavailable')):
+    def test_delivery_failure_retains_registration_and_durable_challenge(self):
+        with patch('accounts.outbox.send_mail', side_effect=OSError('SMTP unavailable')):
             response = self.register()
-        self.assertEqual(response.status_code, 503)
-        self.assertFalse(User.objects.exists())
-        self.assertFalse(EmailOTP.objects.exists())
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(User.objects.exists())
+        self.assertEqual(EmailOTP.objects.get().delivery.state, 'unknown')
 
     def test_code_is_locked_after_five_wrong_attempts(self):
         self.register()
@@ -90,16 +102,19 @@ class EmailVerificationTests(APITestCase):
         self.assertEqual(self.verify(otp).status_code, 400)
         self.assertFalse(User.objects.get().email_verified)
 
-    def test_resend_replaces_code_and_preserves_old_code_on_delivery_failure(self):
+    def test_resend_retains_new_code_for_recovery_on_delivery_failure(self):
         with patch('accounts.email_service.secrets.randbelow', return_value=123):
             self.register()
         self.assertEqual(self.emailed_otp(), '000123')
-        with patch('accounts.email_service.send_mail', side_effect=OSError('SMTP unavailable')):
+        self.throttle_now += 61
+        with patch('accounts.outbox.send_mail', side_effect=OSError('SMTP unavailable')), patch('accounts.email_service.secrets.randbelow', return_value=234):
             response = self.client.post(reverse('resend-verification-email'), {'email': self.credentials['email']})
-        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.status_code, 200)
         from accounts.email_service import hash_email_otp
         record = EmailOTP.objects.get()
-        self.assertEqual(record.code_hash, hash_email_otp(record.user_id, record.email, '000123'))
+        self.assertEqual(record.code_hash, hash_email_otp(record.user_id, record.email, '000234'))
+        self.assertEqual(record.delivery.state, 'unknown')
+        self.throttle_now += 61
         with patch('accounts.email_service.secrets.randbelow', return_value=456):
             response = self.client.post(reverse('resend-verification-email'), {'email': self.credentials['email']})
         self.assertEqual(response.status_code, 200)
@@ -129,9 +144,13 @@ class EmailVerificationTests(APITestCase):
 
 
 @override_settings(DEBUG=True, SMS_BACKEND='accounts.sms_service.console_send_sms')
-class PhoneOTPTests(APITestCase):
+class PhoneOTPTests(APITransactionTestCase):
     def setUp(self):
         cache.clear()
+        self.throttle_now = time.time()
+        timer = patch('accounts.throttles.AccountThrottle.timer', new=staticmethod(lambda: self.throttle_now))
+        timer.start()
+        self.addCleanup(timer.stop)
         self.phone = '+8801712345678'
 
     def send(self):
@@ -156,21 +175,23 @@ class PhoneOTPTests(APITestCase):
             self.assertEqual(self.send().status_code, 200)
             self.assertEqual(self.send().status_code, 429)
 
-    def test_failed_delivery_preserves_previous_code(self):
+    def test_failed_delivery_retains_new_code_for_recovery(self):
         from accounts.otp_service import generate_otp
-        generate_otp(self.phone)
+        with patch('accounts.otp_service.secrets.randbelow', return_value=123):
+            generate_otp(self.phone)
         PhoneOTP.objects.update(expires_at=timezone.now() + timedelta(minutes=3))
         original = PhoneOTP.objects.get().code_hash
-        with patch('api.views.accounts.views.send_sms', side_effect=SMSDeliveryError('Failed')):
-            self.assertEqual(self.send().status_code, 503)
-        self.assertEqual(PhoneOTP.objects.get().code_hash, original)
+        with patch('accounts.outbox.send_sms', side_effect=SMSDeliveryError('Failed')), patch('accounts.otp_service.secrets.randbelow', return_value=456):
+            self.assertEqual(self.send().status_code, 202)
+        self.assertNotEqual(PhoneOTP.objects.get().code_hash, original)
+        self.assertEqual(PhoneOTP.objects.get().delivery.state, 'unknown')
 
     @override_settings(DEBUG=False)
     def test_console_cannot_print_in_production(self):
         with patch('builtins.print') as output:
-            self.assertEqual(self.send().status_code, 503)
+            self.assertEqual(self.send().status_code, 202)
         output.assert_not_called()
-        self.assertFalse(PhoneOTP.objects.exists())
+        self.assertEqual(PhoneOTP.objects.get().delivery.state, 'unknown')
 
     def test_attempt_limit_and_expiry(self):
         with patch('accounts.otp_service.secrets.randbelow', return_value=123), patch('builtins.print'):
@@ -197,6 +218,8 @@ class PhoneOTPTests(APITestCase):
             self.assertEqual(payload['From'], ['+15005550006'])
             self.assertEqual(request.call_args.kwargs['timeout'], 10)
         PhoneOTP.objects.all().delete()
+        PhoneOTPRecipient.objects.update(last_sent_at=timezone.now() - timedelta(seconds=61))
+        self.throttle_now += 61
         with patch('accounts.sms_service.urlopen', side_effect=URLError('unavailable')):
-            self.assertEqual(self.send().status_code, 503)
-        self.assertFalse(PhoneOTP.objects.exists())
+            self.assertEqual(self.send().status_code, 202)
+        self.assertEqual(PhoneOTP.objects.get().delivery.state, 'unknown')

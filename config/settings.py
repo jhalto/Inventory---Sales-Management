@@ -18,7 +18,10 @@ from datetime import timedelta
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-load_dotenv(BASE_DIR / ".env")
+ENVIRONMENT = os.environ.get('DJANGO_ENV', 'development').lower()
+if ENVIRONMENT not in ('development', 'production'):
+    raise ImproperlyConfigured('DJANGO_ENV must be development or production.')
+load_dotenv(BASE_DIR / ('.env.production' if ENVIRONMENT == 'production' else '.env'))
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
@@ -27,15 +30,22 @@ load_dotenv(BASE_DIR / ".env")
 SECRET_KEY = 'django-insecure-uheat(24glm3+ag3#7-99l%v%g_mm7u1z&2v&1b*#!l=mqna@u'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.environ.get('DJANGO_DEBUG', 'true').lower() == 'true'
+debug_value = os.environ.get('DJANGO_DEBUG', 'false' if ENVIRONMENT == 'production' else 'true').lower()
+if debug_value not in ('true', 'false'):
+    raise ImproperlyConfigured('DJANGO_DEBUG must be true or false.')
+DEBUG = debug_value == 'true'
+if ENVIRONMENT == 'production' and DEBUG:
+    raise ImproperlyConfigured('DEBUG cannot be enabled in production.')
 
 ALLOWED_HOSTS = [host.strip() for host in os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',') if host.strip()]
+if DEBUG and not ALLOWED_HOSTS:
+    ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]', '10.0.2.2']
 
 SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', SECRET_KEY)
 PHONE_OTP_SECRET = os.environ.get('PHONE_OTP_SECRET', SECRET_KEY)
 if not DEBUG:
-    if not os.environ.get('DJANGO_SECRET_KEY') or not os.environ.get('PHONE_OTP_SECRET'):
-        raise ImproperlyConfigured('Set DJANGO_SECRET_KEY and PHONE_OTP_SECRET in production.')
+    from .security import production_security
+    globals().update(production_security(os.environ))
 
 SMS_BACKEND = os.environ.get(
     'SMS_BACKEND',
@@ -47,14 +57,27 @@ TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID', '')
 TWILIO_AUTH_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', '')
 TWILIO_FROM_NUMBER = os.environ.get('TWILIO_FROM_NUMBER', '')
 TWILIO_MESSAGING_SERVICE_SID = os.environ.get('TWILIO_MESSAGING_SERVICE_SID', '')
+TWILIO_VERIFY_SERVICE_SID = os.environ.get('TWILIO_VERIFY_SERVICE_SID', '')
+PHONE_OTP_BACKEND = os.environ.get('PHONE_OTP_BACKEND', 'local')
+if PHONE_OTP_BACKEND not in ('local', 'twilio_verify'):
+    raise ImproperlyConfigured('PHONE_OTP_BACKEND must be local or twilio_verify.')
 SMS_TIMEOUT = 10
+outbox_inline_value = os.environ.get('OUTBOX_INLINE_DISPATCH', 'true').lower()
+if outbox_inline_value not in ('true', 'false'):
+    raise ImproperlyConfigured('OUTBOX_INLINE_DISPATCH must be true or false.')
+OUTBOX_INLINE_DISPATCH = outbox_inline_value == 'true'
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '').strip()
 
+# Account limits use PostgreSQL row locks; this cache serves other cache users.
 CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.locmem.LocMemCache' if DEBUG else 'django.core.cache.backends.db.DatabaseCache',
         'LOCATION': 'otp-development' if DEBUG else 'otp_rate_limits',
     },
 }
+# Optional overrides for accounts.throttles.DEFAULT_RATES (for example,
+# {'login_ip': '20/hour'}). Limits apply to authenticated callers as well.
+ACCOUNT_THROTTLE_RATES = {}
 # Application definition
 
 INSTALLED_APPS = [
@@ -65,6 +88,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'rest_framework_simplejwt.token_blacklist',
     'accounts',
     'api',
 ]
@@ -72,6 +96,7 @@ INSTALLED_APPS = [
 AUTH_USER_MODEL = 'accounts.User'
 
 REST_FRAMEWORK = {
+    'NUM_PROXIES': globals().get('ACCOUNT_NUM_PROXIES', 0),
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ],
@@ -88,6 +113,9 @@ MIDDLEWARE = [
 ]
 
 SIMPLE_JWT = {
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
+    "CHECK_REVOKE_TOKEN": True,
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
     "AUTH_HEADER_TYPES": ("Bearer",),
@@ -120,6 +148,7 @@ WSGI_APPLICATION = 'config.wsgi.application'
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
+        "ATOMIC_REQUESTS": False,  # Commit throttle reservations before endpoint work.
         "NAME": os.environ.get("DB_NAME", "inventory_db"),
         "USER": os.environ.get("DB_USER", "jhalto"),
         "PASSWORD": os.environ["DB_PASSWORD"],
@@ -170,6 +199,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 
 # Email

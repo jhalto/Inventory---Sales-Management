@@ -6,6 +6,7 @@ __pycache__/
 # Virtual environments
 venv/
 .venv/
+.venv-*/
 env/
 ENV/
 
@@ -13,6 +14,7 @@ ENV/
 .env
 .env.*
 !.env.example
+!.env.production.example
 *.pem
 *.key
 
@@ -39,6 +41,19 @@ htmlcov/
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
+# Local databases, snapshots, and database sidecar files
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.sqlite.*
+*.sqlite3.*
+# Private data exports; keep sanitized test fixtures in their app directories
+/data-transfer*.json
+/data-transfer*.json.*
+/backups/
+/private-exports/
+*.dump
 media/
 staticfiles/
 

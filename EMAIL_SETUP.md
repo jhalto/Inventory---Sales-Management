@@ -3,6 +3,8 @@
 Registration emails a six-digit OTP and does not issue login tokens until the
 address is verified. Codes expire after 5 minutes and allow at most 5 attempts.
 Successful verification consumes the code. Resending replaces the previous code.
+Registration and resend share a 60-second recipient cooldown and a 5/hour email
+limit. See ACCOUNT_RATE_LIMITS.md for all limits and production cache setup.
 
 The default mailer uses Gmail SMTP on port 587 with STARTTLS.
 Enable 2-Step Verification on your Google account, then create an
@@ -37,6 +39,7 @@ Messages will appear only in the server terminal.
   `POST /api/v1/email/resend-verification/` with `email`.
 - After verification: `POST /api/v1/login/` with `email` and `password`.
 
-Registration returns HTTP 503 if email sending fails, and rolls back account
-creation so registration can be retried. SMTP acceptance does not guarantee inbox
-delivery; check your provider's delivery logs if a sent message does not arrive.
+Registration returns 201 once the account/challenge and encrypted delivery job
+commit. Submission uncertainty retains the account and job for recovery; use
+resend instead of registering again. Run the delivery worker described in
+DELIVERY_WORKFLOW.md. SMTP acceptance does not guarantee inbox delivery.
