@@ -1,2 +1,6 @@
 django
 djangorestframework
+python-dotenv
+psycopg[binary]
+phonenumbers
+djangorestframework-simplejwt
